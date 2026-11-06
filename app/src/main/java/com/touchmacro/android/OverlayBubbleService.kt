@@ -18,23 +18,26 @@ import android.widget.TextView
 class OverlayBubbleService : Service() {
     companion object {
         const val ACTION_SHOW = "com.touchmacro.android.SHOW_BUBBLE"
+        const val ACTION_PLAY = "com.touchmacro.android.PLAY_BUBBLE"
         private const val CHANNEL = "touchmacro_recording"
         private const val NOTIFICATION_ID = 731
     }
     private lateinit var wm: WindowManager
     private var bubble: TextView? = null
+    private var playbackMode = false
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        playbackMode = getSharedPreferences(MacroAccessibilityService.PREFS, MODE_PRIVATE).getBoolean("playing", false)
+        val title = if (playbackMode) "TouchMacro playing macro" else "TouchMacro recording"
+        val note = if (playbackMode) "Tap the floating STOP bubble to stop playback." else "Tap STOP to finish and save."
         val notification = if (Build.VERSION.SDK_INT >= 26)
-            Notification.Builder(this, CHANNEL).setContentTitle("TouchMacro recording")
-                .setContentText("Tap the floating STOP bubble to finish and save.")
+            Notification.Builder(this, CHANNEL).setContentTitle(title).setContentText(note)
                 .setSmallIcon(android.R.drawable.ic_media_pause).setOngoing(true).build()
         else {
             @Suppress("DEPRECATION")
-            Notification.Builder(this).setContentTitle("TouchMacro recording")
-                .setContentText("Tap STOP to finish and save.")
+            Notification.Builder(this).setContentTitle(title).setContentText(note)
                 .setSmallIcon(android.R.drawable.ic_media_pause).setOngoing(true).build()
         }
         if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIFICATION_ID, notification,
@@ -48,7 +51,7 @@ class OverlayBubbleService : Service() {
 
     private fun showBubble() {
         val view = TextView(this).apply {
-            text = "●\nSTOP"
+            text = if (playbackMode) "■\nSTOP" else "●\nSTOP"
             textSize = 12f
             gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
@@ -76,7 +79,7 @@ class OverlayBubbleService : Service() {
                         try { wm.updateViewLayout(view,lp) } catch (_:Exception) {}
                         return true
                     }
-                    MotionEvent.ACTION_UP -> { if (!dragged) finishRecording(); return true }
+                    MotionEvent.ACTION_UP -> { if (!dragged) stopAndReturn(); return true }
                 }
                 return true
             }
@@ -84,13 +87,15 @@ class OverlayBubbleService : Service() {
         try { wm.addView(view,lp); bubble=view } catch (_:Exception) { stopSelf() }
     }
 
-    private fun finishRecording() {
-        getSharedPreferences(MacroAccessibilityService.PREFS, MODE_PRIVATE)
-            .edit().putBoolean("recording",false).apply()
+    private fun stopAndReturn() {
+        val prefs = getSharedPreferences(MacroAccessibilityService.PREFS, MODE_PRIVATE)
+        val wasRecording = prefs.getBoolean("recording", false)
+        prefs.edit().putBoolean("recording",false).putBoolean("playing",false).apply()
+        if (!wasRecording) MacroAccessibilityService.instance?.stopPlayback()
         removeBubble()
         val open=Intent(this,MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            putExtra(MainActivity.EXTRA_SAVE_PENDING,true)
+            if (wasRecording) putExtra(MainActivity.EXTRA_SAVE_PENDING,true)
         }
         val pi=PendingIntent.getActivity(this,77,open,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         try { pi.send() } catch (_:Exception) {}
@@ -103,7 +108,7 @@ class OverlayBubbleService : Service() {
     }
     private fun createChannel() {
         if (Build.VERSION.SDK_INT>=26) {
-            val channel=NotificationChannel(CHANNEL,"Macro recording",NotificationManager.IMPORTANCE_LOW)
+            val channel=NotificationChannel(CHANNEL,"Macro recording and playback",NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
