@@ -53,8 +53,12 @@ class MainActivity : Activity() {
         nav.addView(navButton("MACROS") { showMacros() }, weightParams())
         nav.addView(navButton("SETTINGS") { showSettings() }, weightParams())
         root.addView(nav)
+        val scroll = ScrollView(this)
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        scroll.addView(content)
+        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
-        return root
+        return content
     }
 
     private fun showHome() {
@@ -154,7 +158,8 @@ class MainActivity : Activity() {
             return
         }
         prefs().edit().putString("steps", "[]").putBoolean("recording", true).apply()
-        startService(Intent(this, OverlayBubbleService::class.java).setAction(OverlayBubbleService.ACTION_SHOW))
+        val bubbleIntent = Intent(this, OverlayBubbleService::class.java).setAction(OverlayBubbleService.ACTION_SHOW)
+        if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(bubbleIntent) else startService(bubbleIntent)
         finish()
     }
 
