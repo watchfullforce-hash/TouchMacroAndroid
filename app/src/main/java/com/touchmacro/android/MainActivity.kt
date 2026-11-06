@@ -102,6 +102,33 @@ class MainActivity : Activity() {
                 startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             }
         })
+        page.addView(section("Playback"))
+        val repeatInput = EditText(this).apply {
+            hint = "Repeat count (0 = infinite, max 1000)"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(prefs().getInt("repeat_count", 1).toString())
+            setTextColor(Color.WHITE)
+        }
+        val speedInput = EditText(this).apply {
+            hint = "Playback speed percent (25–400)"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(prefs().getInt("speed_percent", 100).toString())
+            setTextColor(Color.WHITE)
+        }
+        page.addView(label("Repeat count: 0 runs continuously; 1–1000 runs that many times.", 13f, muted))
+        page.addView(repeatInput)
+        page.addView(label("Playback speed: 100 is normal, 200 is twice as fast, 50 is half speed.", 13f, muted))
+        page.addView(speedInput)
+        page.addView(actionButton("SAVE PLAYBACK SETTINGS") {
+            val repeats = repeatInput.text.toString().toIntOrNull()
+            val speed = speedInput.text.toString().toIntOrNull()
+            if (repeats == null || repeats !in 0..1000 || speed == null || speed !in 25..400) {
+                AlertDialog.Builder(this).setMessage("Repeat must be 0–1000 and speed must be 25–400.").setPositiveButton("OK", null).show()
+            } else {
+                prefs().edit().putInt("repeat_count", repeats).putInt("speed_percent", speed).apply()
+                AlertDialog.Builder(this).setMessage("Playback settings saved.").setPositiveButton("OK", null).show()
+            }
+        })
         page.addView(section("Recording"))
         page.addView(label("The floating control lets you return to the app underneath while recording. Tap STOP on the bubble to finish and name the macro. Macros stay saved on this phone.", 13f, muted))
         page.addView(actionButton("BACK TO HOME") { showHome() })
@@ -127,13 +154,36 @@ class MainActivity : Activity() {
             card.addView(label(item.optString("name", "Untitled macro"), 18f, Color.WHITE, true))
             card.addView(label("Actions: ${item.optJSONArray("steps")?.length() ?: 0}", 13f, muted))
             val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            buttons.addView(smallButton("PLAY") { MacroAccessibilityService.instance?.playSteps(item.optJSONArray("steps")?.toString() ?: "[]") }, weightParams())
+            buttons.addView(smallButton("PLAY") { playMacro(item) }, weightParams())
             buttons.addView(smallButton("RENAME") { renameMacro(id) }, weightParams())
             buttons.addView(smallButton("DELETE") { deleteMacro(id) }, weightParams())
             card.addView(buttons)
             val params = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 12 }
             page.addView(card, params)
         }
+    }
+
+    private fun playMacro(item: JSONObject) {
+        if (!isAccessibilityEnabled() || MacroAccessibilityService.instance == null) {
+            AlertDialog.Builder(this).setTitle("Accessibility service unavailable")
+                .setMessage("Enable TouchMacro's Accessibility service before playing a macro.")
+                .setPositiveButton("OPEN SETTINGS") { _, _ -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                .setNegativeButton("CANCEL", null).show()
+            return
+        }
+        if (!Settings.canDrawOverlays(this)) {
+            AlertDialog.Builder(this).setMessage("Allow display over other apps to show the playback STOP bubble.")
+                .setPositiveButton("ALLOW") { _, _ -> startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) }
+                .setNegativeButton("CANCEL", null).show()
+            return
+        }
+        val repeats = prefs().getInt("repeat_count", 1)
+        val speed = prefs().getInt("speed_percent", 100)
+        prefs().edit().putBoolean("recording", false).putBoolean("playing", true).apply()
+        MacroAccessibilityService.instance?.playSteps(item.optJSONArray("steps")?.toString() ?: "[]", repeats, speed)
+        val bubbleIntent = Intent(this, OverlayBubbleService::class.java).setAction(OverlayBubbleService.ACTION_PLAY)
+        if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(bubbleIntent) else startService(bubbleIntent)
+        finish()
     }
 
     private fun beginRecording() {
