@@ -207,7 +207,25 @@ class MainActivity : Activity() {
                 .setNegativeButton("CANCEL", null).show()
             return
         }
-        prefs().edit().putString("steps", "[]").putBoolean("recording", true).apply()
+        if (android.os.Build.VERSION.SDK_INT < 34) {
+            AlertDialog.Builder(this).setTitle("Experimental mode unavailable")
+                .setMessage("Raw touchscreen gesture capture requires Android 14 or newer. Normal click recording is still available.")
+                .setPositiveButton("START NORMAL RECORDING") { _, _ -> startRecordingNow(false) }
+                .setNegativeButton("CANCEL", null).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Experimental touchscreen recording")
+            .setMessage("This mode can record taps and swipe paths, including some home-screen gestures. Android may temporarily intercept touchscreen input while recording, so taps may not reach the app underneath. Use the floating STOP bubble to finish. If touch controls behave unexpectedly, stop recording immediately.")
+            .setPositiveButton("ENABLE & RECORD") { _, _ -> startRecordingNow(true) }
+            .setNegativeButton("CANCEL", null).show()
+    }
+
+    private fun startRecordingNow(experimental: Boolean) {
+        prefs().edit().putString("steps", "[]")
+            .putBoolean("recording", true)
+            .putBoolean("experimental_gesture", experimental).apply()
+        MacroAccessibilityService.instance?.updateExperimentalCapture(experimental)
         val bubbleIntent = Intent(this, OverlayBubbleService::class.java).setAction(OverlayBubbleService.ACTION_SHOW)
         if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(bubbleIntent) else startService(bubbleIntent)
         finish()
