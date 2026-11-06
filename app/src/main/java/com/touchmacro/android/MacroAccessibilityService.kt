@@ -16,7 +16,11 @@ class MacroAccessibilityService : AccessibilityService() {
         @Volatile var instance: MacroAccessibilityService? = null
     }
     private val handler = Handler(Looper.getMainLooper())
-    private var playing = false
+    @Volatile private var playing = false
+    private var currentRepeat = 0
+    private var repeatLimit = 1
+    private var speedFactor = 1f
+    private lateinit var playStepsData: JSONArray
 
     override fun onServiceConnected() { super.onServiceConnected(); instance = this }
 
@@ -41,33 +45,51 @@ class MacroAccessibilityService : AccessibilityService() {
 
     fun play() {
         val raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString("steps", "[]") ?: "[]"
-        playSteps(raw)
+        playSteps(raw, 1, 100)
     }
 
-    fun playSteps(raw: String) {
+    fun playSteps(raw: String, repeats: Int = 1, speedPercent: Int = 100) {
         if (playing) return
-        val steps = try { JSONArray(raw) } catch (_: Exception) { JSONArray() }
-        if (steps.length() == 0) return
+        val parsed = try { JSONArray(raw) } catch (_: Exception) { JSONArray() }
+        if (parsed.length() == 0) return
+        playStepsData = parsed
+        repeatLimit = repeats.coerceIn(0, 1000)
+        currentRepeat = 0
+        speedFactor = speedPercent.coerceIn(25, 400) / 100f
         playing = true
-        playAt(steps, 0)
+        playAt(0)
     }
 
-    private fun playAt(steps: JSONArray, index: Int) {
-        if (index >= steps.length()) { playing = false; return }
-        val item = steps.optJSONObject(index)
-        if (item == null) { playAt(steps, index + 1); return }
+    fun stopPlayback() {
+        playing = false
+        handler.removeCallbacksAndMessages(null)
+    }
+
+    private fun playAt(index: Int) {
+        if (!playing) return
+        if (index >= playStepsData.length()) {
+            currentRepeat++
+            if (repeatLimit == 0 || currentRepeat < repeatLimit) playAt(0)
+            else playing = false
+            return
+        }
+        val item = playStepsData.optJSONObject(index)
+        if (item == null) { playAt(index + 1); return }
+        val delay = (item.optLong("delay", 450L) / speedFactor).toLong().coerceAtLeast(0L)
         handler.postDelayed({
+            if (!playing) return@postDelayed
             val path = Path().apply { moveTo(item.optDouble("x").toFloat(), item.optDouble("y").toFloat()) }
+            val duration = (item.optLong("duration", 70L) / speedFactor).toLong().coerceIn(50L, 2000L)
             val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, item.optLong("duration",70L).coerceIn(50L,2000L)))
+                .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
                 .build()
             dispatchGesture(gesture, object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) { playAt(steps,index+1) }
-                override fun onCancelled(gestureDescription: GestureDescription?) { playAt(steps,index+1) }
+                override fun onCompleted(gestureDescription: GestureDescription?) { if (playing) playAt(index + 1) }
+                override fun onCancelled(gestureDescription: GestureDescription?) { if (playing) playAt(index + 1) }
             }, handler)
-        }, item.optLong("delay",450L).coerceAtLeast(0L))
+        }, delay)
     }
 
-    override fun onInterrupt() { playing=false; handler.removeCallbacksAndMessages(null) }
-    override fun onDestroy() { instance=null; handler.removeCallbacksAndMessages(null); super.onDestroy() }
+    override fun onInterrupt() { stopPlayback(); handler.removeCallbacksAndMessages(null) }
+    override fun onDestroy() { stopPlayback(); instance=null; super.onDestroy() }
 }
