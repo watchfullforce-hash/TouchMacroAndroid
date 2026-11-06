@@ -90,8 +90,7 @@ class OverlayBubbleService : Service() {
     private fun stopAndReturn() {
         val prefs = getSharedPreferences(MacroAccessibilityService.PREFS, MODE_PRIVATE)
         val wasRecording = prefs.getBoolean("recording", false)
-        prefs.edit().putBoolean("recording",false).putBoolean("playing",false).putBoolean("experimental_gesture",false).apply()
-        MacroAccessibilityService.instance?.updateExperimentalCapture(false)
+        prefs.edit().putBoolean("recording",false).putBoolean("playing",false).apply()
         if (!wasRecording) MacroAccessibilityService.instance?.stopPlayback()
         removeBubble()
         val open=Intent(this,MainActivity::class.java).apply {
