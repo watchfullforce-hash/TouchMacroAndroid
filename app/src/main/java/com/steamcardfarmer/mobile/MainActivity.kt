@@ -227,32 +227,38 @@ private fun App(
                 }
                 if (page == 0) {
                     item {
-                        CardBox("APP UPDATER", release?.let { "Version ${it.version} available" } ?: if (checking) "Checking for updates…" else if (updateError != null) "Update check failed" else "You're up to date", "Installed: ${BuildConfig.VERSION_NAME}", "Checks GitHub when the app opens. Android asks you to approve installation.") {
-                            if (checking) LinearProgressIndicator(Modifier.fillMaxWidth())
-                            release?.let { available ->
-                                if (available.notes.isNotBlank()) Text(available.notes, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
-                                Button(
-                                    enabled = !downloading,
-                                    onClick = {
-                                        downloading = true
-                                        downloadProgress = 0f
-                                        onDownloadUpdate(available, { pct -> downloadProgress = pct }) { error ->
-                                            downloading = false
-                                            if (error != null) updateError = error else onInstallUpdate()
-                                        }
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) { Text(if (downloading) "DOWNLOADING…" else "DOWNLOAD UPDATE") }
-                                if (downloading) LinearProgressIndicator(progress = { downloadProgress }, modifier = Modifier.fillMaxWidth())
+                        CardBox(
+                            title = "APP UPDATER",
+                            headline = release?.let { "Version ${it.version} available" } ?: if (checking) "Checking for updates…" else if (updateError != null) "Update check failed" else "You're up to date",
+                            body = "Installed: ${BuildConfig.VERSION_NAME}. Checks GitHub when the app opens. Android asks you to approve installation.",
+                            content = {
+                                if (checking) LinearProgressIndicator(Modifier.fillMaxWidth())
+                                val available = release
+                                if (available != null) {
+                                    if (available.notes.isNotBlank()) Text(available.notes, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                                    Button(
+                                        enabled = !downloading,
+                                        onClick = {
+                                            downloading = true
+                                            downloadProgress = 0f
+                                            onDownloadUpdate(available, { pct -> downloadProgress = pct }) { error ->
+                                                downloading = false
+                                                if (error != null) updateError = error else onInstallUpdate()
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) { Text(if (downloading) "DOWNLOADING…" else "DOWNLOAD UPDATE") }
+                                    if (downloading) LinearProgressIndicator(progress = { downloadProgress }, modifier = Modifier.fillMaxWidth())
+                                }
+                                updateError?.let { error -> Text(error, color = Color(0xFFFFC266), fontSize = 11.sp) }
+                                Button(onClick = {
+                                    checking = true
+                                    updateError = null
+                                    release = null
+                                    onCheckUpdates { info, error -> release = info; updateError = error; checking = false }
+                                }, modifier = Modifier.fillMaxWidth()) { Text("CHECK FOR UPDATES") }
                             }
-                            updateError?.let { Text(it, color = Color(0xFFFFC266), fontSize = 11.sp) }
-                            Button(onClick = {
-                                checking = true
-                                updateError = null
-                                release = null
-                                onCheckUpdates { info, error -> release = info; updateError = error; checking = false }
-                            }, modifier = Modifier.fillMaxWidth()) { Text("CHECK FOR UPDATES") }
-                        }
+                        )
                     }
                 }
                 when(page) {
