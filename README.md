@@ -1,11 +1,18 @@
-# Steam Card Farmer Android prototype
+# Steam Card Farmer Android
 
-AMOLED black Android app shell, Kotlin + Jetpack Compose. Package: com.steamcardfarmer.mobile. Minimum Android 8.0.
+Kotlin + Jetpack Compose Android app, AMOLED theme. Package: com.steamcardfarmer.mobile.
 
-## Build APK
-Push to main or run the GitHub Actions workflow named **Build Steam Card Farmer APK**. Download the artifact **Steam-Card-Farmer-APK** from the completed run.
+## Automatic updates
+The app checks the latest GitHub Release on startup. When a newer APK is published, it offers a download and hands the signed APK to Android's package installer. Android requires the user to approve installation. All update APKs must use the same private signing key.
 
-## Current limitations
-This APK is a UI prototype. It does not yet authenticate or link Steam accounts, farm games, detect card drops, read inventory, sell cards, run background sessions, or support multiple accounts. Steam sign-in currently opens the Steam-hosted page only; secure OpenID callback validation is not implemented. Never enter Steam passwords, Steam Guard codes, or session cookies into this app.
+## One-time release signing setup
+Add these repository Actions secrets:
+- SIGNING_KEY_BASE64
+- SIGNING_KEY_PASSWORD
+- SIGNING_KEY_ALIAS
+- SIGNING_KEY_STORE_PASSWORD
 
-The actual no-PC farming protocol still requires technical and security validation. Do not treat the prototype as a functioning farmer or expect card drops.
+The APK build workflow always creates a debug artifact. When all signing secrets exist, it also builds a signed release APK and publishes a versioned GitHub Release for the in-app updater.
+
+## Current scope
+The update framework is being introduced. Steam account sign-in still opens Steam's official login page; verified OpenID linking, card farming, inventory and market functions are not yet implemented. Never enter Steam credentials into this app.

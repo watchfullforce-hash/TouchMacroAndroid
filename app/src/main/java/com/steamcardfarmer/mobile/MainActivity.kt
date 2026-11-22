@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,13 +25,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 private val Black = Color(0xFF050505)
 private val Panel = Color(0xFF151515)
 private val Green = Color(0xFF35D477)
 private val Muted = Color(0xFFAAAAAA)
+private const val RELEASE_API = "https://api.github.com/repos/watchfullforce-hash/TouchMacroAndroid/releases/latest"
 
 private data class SavedSteamAccount(val username: String)
+private data class ReleaseInfo(val version: String, val apkUrl: String, val notes: String)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,15 +45,81 @@ class MainActivity : ComponentActivity() {
             App(
                 loadAccounts = { readAccounts(this) },
                 saveAccounts = { writeAccounts(this, it) },
-                onSteamLogin = { openSteamLogin() }
+                onSteamLogin = { openSteamLogin() },
+                onCheckUpdates = { checkForUpdate { release, error -> runOnUiThread { updateState(release, error) } } },
+                onInstallUpdate = { installDownloadedUpdate() }
             )
         }
     }
 
-    private fun openSteamLogin() {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://steamcommunity.com/login/home/"))
-        startActivity(intent)
+    private var updateState: ((ReleaseInfo?, String?) -> Unit) = { _, _ -> }
+    private var pendingApk: File? = null
+
+    private fun checkForUpdate(callback: (ReleaseInfo?, String?) -> Unit) {
+        updateState = callback
+        Thread {
+            try {
+                val connection = (URL(RELEASE_API).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 12000
+                    readTimeout = 12000
+                    setRequestProperty("Accept", "application/vnd.github+json")
+                    setRequestProperty("User-Agent", "SteamCardFarmer-Android")
+                }
+                val json = connection.inputStream.bufferedReader().use { it.readText() }
+                connection.disconnect()
+                val release = JSONObject(json)
+                val tag = release.optString("tag_name").removePrefix("v")
+                val asset = release.optJSONArray("assets")
+                var apkUrl: String? = null
+                if (asset != null) {
+                    for (i in 0 until asset.length()) {
+                        val item = asset.getJSONObject(i)
+                        if (item.optString("name").endsWith(".apk", ignoreCase = true)) {
+                            apkUrl = item.optString("browser_download_url")
+                            break
+                        }
+                    }
+                }
+                if (apkUrl.isNullOrBlank()) throw IllegalStateException("The latest release has no APK attached yet.")
+                val current = BuildConfig.VERSION_NAME
+                val result = if (compareVersions(tag, current) > 0) {
+                    ReleaseInfo(tag, apkUrl, release.optString("body").take(1200))
+                } else null
+                runOnUiThread { callback(result, null) }
+            } catch (e: Exception) {
+                runOnUiThread { callback(null, e.message ?: "Could not check for updates.") }
+            }
+        }.start()
     }
+
+    private fun installDownloadedUpdate() {
+        val file = pendingApk ?: return
+        try {
+            val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            android.widget.Toast.makeText(this, "Unable to open Android installer: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openSteamLogin() {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://steamcommunity.com/login/home/")))
+    }
+}
+
+private fun compareVersions(a: String, b: String): Int {
+    val left = a.split(".").map { it.toIntOrNull() ?: 0 }
+    val right = b.split(".").map { it.toIntOrNull() ?: 0 }
+    for (i in 0 until maxOf(left.size, right.size)) {
+        val x = left.getOrElse(i) { 0 }
+        val y = right.getOrElse(i) { 0 }
+        if (x != y) return x.compareTo(y)
+    }
+    return 0
 }
 
 private fun readAccounts(context: Context): List<SavedSteamAccount> {
@@ -64,9 +136,7 @@ private fun readAccounts(context: Context): List<SavedSteamAccount> {
 
 private fun writeAccounts(context: Context, accounts: List<SavedSteamAccount>) {
     val array = JSONArray()
-    accounts.forEach { account ->
-        array.put(JSONObject().put("username", account.username))
-    }
+    accounts.forEach { array.put(JSONObject().put("username", it.username)) }
     context.getSharedPreferences("steam_card_farmer", Context.MODE_PRIVATE)
         .edit().putString("saved_accounts", array.toString()).apply()
 }
@@ -75,16 +145,29 @@ private fun writeAccounts(context: Context, accounts: List<SavedSteamAccount>) {
 private fun App(
     loadAccounts: () -> List<SavedSteamAccount>,
     saveAccounts: (List<SavedSteamAccount>) -> Unit,
-    onSteamLogin: () -> Unit
+    onSteamLogin: () -> Unit,
+    onCheckUpdates: () -> Unit,
+    onInstallUpdate: () -> Unit
 ) {
     var page by remember { mutableStateOf(0) }
     var protectFoils by remember { mutableStateOf(true) }
     var autoSell by remember { mutableStateOf(false) }
     var usernameInput by remember { mutableStateOf("") }
+    var release by remember { mutableStateOf<ReleaseInfo?>(null) }
+    var updateError by remember { mutableStateOf<String?>(null) }
+    var checking by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableFloatStateOf(0f) }
+    var downloadMessage by remember { mutableStateOf("Checking for updates…") }
     val accounts = remember { mutableStateListOf<SavedSteamAccount>().apply { addAll(loadAccounts()) } }
     val names = listOf("Home", "Farm", "Games", "Cards", "More")
-
     fun persist() = saveAccounts(accounts.toList())
+
+    // Startup check. A release must be published with a consistently signed APK.
+    LaunchedEffect(Unit) {
+        checking = true
+        onCheckUpdates()
+    }
 
     MaterialTheme(colorScheme = darkColorScheme(primary = Green, background = Black, surface = Panel)) {
         Scaffold(containerColor = Black, topBar = {
@@ -106,73 +189,89 @@ private fun App(
                         Text("ENGINE STATUS: NOT CONNECTED", color = Color(0xFFFF6262), fontWeight = FontWeight.Bold)
                     }
                 }
+                if (page == 0) {
+                    item {
+                        CardBox("APP UPDATER", release?.let { "Version ${it.version} available" } ?: if (checking) "Checking for updates…" else if (updateError != null) "Update check failed" else "You're up to date", "Installed: ${BuildConfig.VERSION_NAME}", "The app checks GitHub Releases when it opens. Android will ask you to confirm each installation.") {
+                            if (checking) LinearProgressIndicator(Modifier.fillMaxWidth())
+                            if (release != null) {
+                                Text(release!!.notes.ifBlank { "New version available." }, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                                Button(
+                                    onClick = {
+                                        val target = release!!
+                                        downloading = true
+                                        downloadProgress = 0f
+                                        Thread {
+                                            try {
+                                                val conn = (URL(target.apkUrl).openConnection() as HttpURLConnection).apply {
+                                                    connectTimeout = 15000
+                                                    readTimeout = 30000
+                                                    setRequestProperty("User-Agent", "SteamCardFarmer-Android")
+                                                }
+                                                val total = conn.contentLengthLong
+                                                val dir = File(androidx.compose.ui.platform.LocalContext.current.cacheDir, "updates")
+                                                dir.mkdirs()
+                                                val output = File(dir, "steam-card-farmer-${target.version}.apk")
+                                                conn.inputStream.use { input ->
+                                                    output.outputStream().use { out ->
+                                                        val buffer = ByteArray(8192)
+                                                        var count: Int
+                                                        var received = 0L
+                                                        while (input.read(buffer).also { count = it } >= 0) {
+                                                            out.write(buffer, 0, count)
+                                                            received += count
+                                                            if (total > 0) {
+                                                                val pct = received.toFloat() / total
+                                                                // UI update is posted by the host callback below.
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                conn.disconnect()
+                                                // installer launch is handled after successful download
+                                            } catch (_: Exception) { }
+                                        }.start()
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) { Text(if (downloading) "DOWNLOADING…" else "DOWNLOAD UPDATE") }
+                            }
+                            if (updateError != null) Text(updateError!!, color = Color(0xFFFFC266), fontSize = 11.sp)
+                            Button(onClick = { checking = true; updateError = null; onCheckUpdates() }, modifier = Modifier.fillMaxWidth()) {
+                                Text("CHECK FOR UPDATES")
+                            }
+                        }
+                    }
+                }
                 when(page) {
                     0 -> {
                         item {
                             CardBox("STEAM ACCOUNTS", if (accounts.isEmpty()) "No saved accounts" else "${accounts.size} saved account(s)", "Save Steam login names for quick access. Sign-in always happens on Steam's official website.") {
-                                OutlinedTextField(
-                                    value = usernameInput,
-                                    onValueChange = { usernameInput = it },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
-                                    label = { Text("Steam account name") },
-                                    placeholder = { Text("Enter Steam username") },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedTextColor = Color.White,
-                                        unfocusedTextColor = Color.White,
-                                        focusedBorderColor = Green,
-                                        unfocusedBorderColor = Muted,
-                                        focusedLabelColor = Green,
-                                        unfocusedLabelColor = Muted,
-                                        cursorColor = Green
-                                    )
-                                )
-                                Button(
-                                    onClick = {
-                                        val name = usernameInput.trim()
-                                        if (name.isNotEmpty() && accounts.none { it.username.equals(name, ignoreCase = true) }) {
-                                            accounts.add(SavedSteamAccount(name))
-                                            persist()
-                                            usernameInput = ""
-                                        }
-                                    },
-                                    enabled = usernameInput.isNotBlank(),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("SAVE ACCOUNT") }
-                                if (accounts.isNotEmpty()) {
-                                    HorizontalDivider(color = Color.DarkGray)
-                                    accounts.forEach { account ->
-                                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                                            Column(Modifier.weight(1f)) {
-                                                Text(account.username, color = Color.White, fontWeight = FontWeight.SemiBold)
-                                                Text("Saved on this device", color = Muted, fontSize = 10.sp)
-                                            }
-                                            TextButton(onClick = onSteamLogin) { Text("SIGN IN", color = Green) }
-                                            IconButton(onClick = { accounts.remove(account); persist() }) {
-                                                Icon(Icons.Default.DeleteOutline, contentDescription = "Remove account", tint = Color(0xFFFF7777))
-                                            }
-                                        }
+                                OutlinedTextField(value = usernameInput, onValueChange = { usernameInput = it }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Steam account name") }, placeholder = { Text("Enter Steam username") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+                                Button(onClick = {
+                                    val name = usernameInput.trim()
+                                    if (name.isNotEmpty() && accounts.none { it.username.equals(name, true) }) { accounts.add(SavedSteamAccount(name)); persist(); usernameInput = "" }
+                                }, enabled = usernameInput.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text("SAVE ACCOUNT") }
+                                accounts.forEach { account ->
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                        Text(account.username, color = Color.White, modifier = Modifier.weight(1f))
+                                        TextButton(onClick = onSteamLogin) { Text("SIGN IN", color = Green) }
+                                        IconButton(onClick = { accounts.remove(account); persist() }) { Icon(Icons.Default.DeleteOutline, "Remove", tint = Color(0xFFFF7777)) }
                                     }
                                 }
-                                Button(onClick = onSteamLogin, modifier = Modifier.fillMaxWidth()) {
-                                    Text("OPEN STEAM LOGIN / QR")
-                                }
-                                Text("Your username is saved locally. Passwords and Steam Guard codes are never stored by this app. Enter them only on Steam's official sign-in page.", color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
-                                Text("Account linking is not complete yet: secure Steam OpenID return verification is still required before the app can load your library.", color = Color(0xFFFFC266), fontSize = 11.sp, lineHeight = 16.sp)
+                                Button(onClick = onSteamLogin, modifier = Modifier.fillMaxWidth()) { Text("OPEN STEAM LOGIN / QR") }
+                                Text("Usernames are saved locally. Passwords, Steam Guard codes and session cookies are never stored here.", color = Muted, fontSize = 11.sp)
                             }
                         }
                         item { CardBox("AUTOMATIC FARMING", "Not available yet", "This prototype does not run Steam sessions, discover eligible games or detect card drops.") {} }
                     }
-                    1 -> item { CardBox("FARMING QUEUE", "No games queued", "Queue interface is planned. Actual farming engine and verified drop tracking are not implemented.") {} }
-                    2 -> item { CardBox("GAME LIBRARY", "No Steam library loaded", "A verified Steam account connection is required to import owned games. No sample games are shown as real data.") {} }
+                    1 -> item { CardBox("FARMING QUEUE", "No games queued", "Actual farming engine and verified drop tracking are not implemented.") {} }
+                    2 -> item { CardBox("GAME LIBRARY", "No Steam library loaded", "Secure Steam account linking is not implemented yet.") {} }
                     3 -> item { CardBox("CARD INVENTORY", "No inventory loaded", "Live inventory, market prices and selling are not connected.") {
                         Row(verticalAlignment = Alignment.CenterVertically) { Text("Protect foil cards", Modifier.weight(1f), color = Color.White); Switch(protectFoils, { protectFoils = it }) }
                         Row(verticalAlignment = Alignment.CenterVertically) { Text("Automatic selling", Modifier.weight(1f), color = Color.White); Switch(autoSell, { autoSell = it }) }
                     } }
                     else -> item { CardBox("MORE WORKSPACES", "Coming in later builds", "Deal discovery • Playtime tools • Achievement viewer • Chat • Farming history • Background service") {} }
                 }
-                item { Text("Unofficial prototype • Not affiliated with Valve • v0.3.0", color = Muted, fontSize = 10.sp) }
+                item { Text("Unofficial prototype • Not affiliated with Valve • v${BuildConfig.VERSION_NAME}", color = Muted, fontSize = 10.sp) }
             }
         }
     }
