@@ -46,17 +46,16 @@ class MainActivity : ComponentActivity() {
                 loadAccounts = { readAccounts(this) },
                 saveAccounts = { writeAccounts(this, it) },
                 onSteamLogin = { openSteamLogin() },
-                onCheckUpdates = { checkForUpdate { release, error -> runOnUiThread { updateState(release, error) } } },
+                onCheckUpdates = { callback -> checkForUpdate(callback) },
+                onDownloadUpdate = { release, progress, complete -> downloadUpdate(release, progress, complete) },
                 onInstallUpdate = { installDownloadedUpdate() }
             )
         }
     }
 
-    private var updateState: ((ReleaseInfo?, String?) -> Unit) = { _, _ -> }
     private var pendingApk: File? = null
 
     private fun checkForUpdate(callback: (ReleaseInfo?, String?) -> Unit) {
-        updateState = callback
         Thread {
             try {
                 val connection = (URL(RELEASE_API).openConnection() as HttpURLConnection).apply {
@@ -69,25 +68,62 @@ class MainActivity : ComponentActivity() {
                 connection.disconnect()
                 val release = JSONObject(json)
                 val tag = release.optString("tag_name").removePrefix("v")
-                val asset = release.optJSONArray("assets")
+                val assets = release.optJSONArray("assets")
                 var apkUrl: String? = null
-                if (asset != null) {
-                    for (i in 0 until asset.length()) {
-                        val item = asset.getJSONObject(i)
-                        if (item.optString("name").endsWith(".apk", ignoreCase = true)) {
-                            apkUrl = item.optString("browser_download_url")
-                            break
-                        }
+                if (assets != null) for (i in 0 until assets.length()) {
+                    val asset = assets.getJSONObject(i)
+                    if (asset.optString("name").endsWith(".apk", true)) {
+                        apkUrl = asset.optString("browser_download_url")
+                        break
                     }
                 }
-                if (apkUrl.isNullOrBlank()) throw IllegalStateException("The latest release has no APK attached yet.")
-                val current = BuildConfig.VERSION_NAME
-                val result = if (compareVersions(tag, current) > 0) {
-                    ReleaseInfo(tag, apkUrl, release.optString("body").take(1200))
-                } else null
+                if (apkUrl.isNullOrBlank()) throw IllegalStateException("The latest release does not contain a signed APK yet.")
+                val result = if (compareVersions(tag, BuildConfig.VERSION_NAME) > 0)
+                    ReleaseInfo(tag, apkUrl, release.optString("body").take(1200)) else null
                 runOnUiThread { callback(result, null) }
             } catch (e: Exception) {
                 runOnUiThread { callback(null, e.message ?: "Could not check for updates.") }
+            }
+        }.start()
+    }
+
+    private fun downloadUpdate(
+        release: ReleaseInfo,
+        onProgress: (Float) -> Unit,
+        onComplete: (String?) -> Unit
+    ) {
+        Thread {
+            try {
+                val connection = (URL(release.apkUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 15000
+                    readTimeout = 30000
+                    setRequestProperty("User-Agent", "SteamCardFarmer-Android")
+                }
+                val total = connection.contentLengthLong
+                val dir = File(cacheDir, "updates").apply { mkdirs() }
+                val output = File(dir, "steam-card-farmer-${release.version}.apk")
+                connection.inputStream.use { input ->
+                    output.outputStream().use { out ->
+                        val buffer = ByteArray(16 * 1024)
+                        var received = 0L
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            out.write(buffer, 0, count)
+                            received += count
+                            if (total > 0) {
+                                val pct = (received.toFloat() / total).coerceIn(0f, 1f)
+                                runOnUiThread { onProgress(pct) }
+                            }
+                        }
+                    }
+                }
+                connection.disconnect()
+                if (!output.exists() || output.length() < 100_000L) throw IllegalStateException("Downloaded APK looks incomplete.")
+                pendingApk = output
+                runOnUiThread { onProgress(1f); onComplete(null) }
+            } catch (e: Exception) {
+                runOnUiThread { onComplete(e.message ?: "Download failed.") }
             }
         }.start()
     }
@@ -123,8 +159,7 @@ private fun compareVersions(a: String, b: String): Int {
 }
 
 private fun readAccounts(context: Context): List<SavedSteamAccount> {
-    val raw = context.getSharedPreferences("steam_card_farmer", Context.MODE_PRIVATE)
-        .getString("saved_accounts", "[]") ?: "[]"
+    val raw = context.getSharedPreferences("steam_card_farmer", Context.MODE_PRIVATE).getString("saved_accounts", "[]") ?: "[]"
     return try {
         val array = JSONArray(raw)
         (0 until array.length()).mapNotNull { index ->
@@ -137,8 +172,7 @@ private fun readAccounts(context: Context): List<SavedSteamAccount> {
 private fun writeAccounts(context: Context, accounts: List<SavedSteamAccount>) {
     val array = JSONArray()
     accounts.forEach { array.put(JSONObject().put("username", it.username)) }
-    context.getSharedPreferences("steam_card_farmer", Context.MODE_PRIVATE)
-        .edit().putString("saved_accounts", array.toString()).apply()
+    context.getSharedPreferences("steam_card_farmer", Context.MODE_PRIVATE).edit().putString("saved_accounts", array.toString()).apply()
 }
 
 @Composable
@@ -146,7 +180,8 @@ private fun App(
     loadAccounts: () -> List<SavedSteamAccount>,
     saveAccounts: (List<SavedSteamAccount>) -> Unit,
     onSteamLogin: () -> Unit,
-    onCheckUpdates: () -> Unit,
+    onCheckUpdates: ((ReleaseInfo?, String?) -> Unit) -> Unit,
+    onDownloadUpdate: (ReleaseInfo, (Float) -> Unit, (String?) -> Unit) -> Unit,
     onInstallUpdate: () -> Unit
 ) {
     var page by remember { mutableStateOf(0) }
@@ -155,18 +190,19 @@ private fun App(
     var usernameInput by remember { mutableStateOf("") }
     var release by remember { mutableStateOf<ReleaseInfo?>(null) }
     var updateError by remember { mutableStateOf<String?>(null) }
-    var checking by remember { mutableStateOf(false) }
+    var checking by remember { mutableStateOf(true) }
     var downloading by remember { mutableStateOf(false) }
     var downloadProgress by remember { mutableFloatStateOf(0f) }
-    var downloadMessage by remember { mutableStateOf("Checking for updates…") }
     val accounts = remember { mutableStateListOf<SavedSteamAccount>().apply { addAll(loadAccounts()) } }
     val names = listOf("Home", "Farm", "Games", "Cards", "More")
     fun persist() = saveAccounts(accounts.toList())
 
-    // Startup check. A release must be published with a consistently signed APK.
     LaunchedEffect(Unit) {
-        checking = true
-        onCheckUpdates()
+        onCheckUpdates { info, error ->
+            release = info
+            updateError = error
+            checking = false
+        }
     }
 
     MaterialTheme(colorScheme = darkColorScheme(primary = Green, background = Black, surface = Panel)) {
@@ -191,60 +227,38 @@ private fun App(
                 }
                 if (page == 0) {
                     item {
-                        CardBox("APP UPDATER", release?.let { "Version ${it.version} available" } ?: if (checking) "Checking for updates…" else if (updateError != null) "Update check failed" else "You're up to date", "Installed: ${BuildConfig.VERSION_NAME}", "The app checks GitHub Releases when it opens. Android will ask you to confirm each installation.") {
+                        CardBox("APP UPDATER", release?.let { "Version ${it.version} available" } ?: if (checking) "Checking for updates…" else if (updateError != null) "Update check failed" else "You're up to date", "Installed: ${BuildConfig.VERSION_NAME}", "Checks GitHub when the app opens. Android asks you to approve installation.") {
                             if (checking) LinearProgressIndicator(Modifier.fillMaxWidth())
-                            if (release != null) {
-                                Text(release!!.notes.ifBlank { "New version available." }, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
+                            release?.let { available ->
+                                if (available.notes.isNotBlank()) Text(available.notes, color = Muted, fontSize = 11.sp, lineHeight = 16.sp)
                                 Button(
+                                    enabled = !downloading,
                                     onClick = {
-                                        val target = release!!
                                         downloading = true
                                         downloadProgress = 0f
-                                        Thread {
-                                            try {
-                                                val conn = (URL(target.apkUrl).openConnection() as HttpURLConnection).apply {
-                                                    connectTimeout = 15000
-                                                    readTimeout = 30000
-                                                    setRequestProperty("User-Agent", "SteamCardFarmer-Android")
-                                                }
-                                                val total = conn.contentLengthLong
-                                                val dir = File(androidx.compose.ui.platform.LocalContext.current.cacheDir, "updates")
-                                                dir.mkdirs()
-                                                val output = File(dir, "steam-card-farmer-${target.version}.apk")
-                                                conn.inputStream.use { input ->
-                                                    output.outputStream().use { out ->
-                                                        val buffer = ByteArray(8192)
-                                                        var count: Int
-                                                        var received = 0L
-                                                        while (input.read(buffer).also { count = it } >= 0) {
-                                                            out.write(buffer, 0, count)
-                                                            received += count
-                                                            if (total > 0) {
-                                                                val pct = received.toFloat() / total
-                                                                // UI update is posted by the host callback below.
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                conn.disconnect()
-                                                // installer launch is handled after successful download
-                                            } catch (_: Exception) { }
-                                        }.start()
+                                        onDownloadUpdate(available, { pct -> downloadProgress = pct }) { error ->
+                                            downloading = false
+                                            if (error != null) updateError = error else onInstallUpdate()
+                                        }
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 ) { Text(if (downloading) "DOWNLOADING…" else "DOWNLOAD UPDATE") }
+                                if (downloading) LinearProgressIndicator(progress = { downloadProgress }, modifier = Modifier.fillMaxWidth())
                             }
-                            if (updateError != null) Text(updateError!!, color = Color(0xFFFFC266), fontSize = 11.sp)
-                            Button(onClick = { checking = true; updateError = null; onCheckUpdates() }, modifier = Modifier.fillMaxWidth()) {
-                                Text("CHECK FOR UPDATES")
-                            }
+                            updateError?.let { Text(it, color = Color(0xFFFFC266), fontSize = 11.sp) }
+                            Button(onClick = {
+                                checking = true
+                                updateError = null
+                                release = null
+                                onCheckUpdates { info, error -> release = info; updateError = error; checking = false }
+                            }, modifier = Modifier.fillMaxWidth()) { Text("CHECK FOR UPDATES") }
                         }
                     }
                 }
                 when(page) {
                     0 -> {
                         item {
-                            CardBox("STEAM ACCOUNTS", if (accounts.isEmpty()) "No saved accounts" else "${accounts.size} saved account(s)", "Save Steam login names for quick access. Sign-in always happens on Steam's official website.") {
+                            CardBox("STEAM ACCOUNTS", if (accounts.isEmpty()) "No saved accounts" else "${accounts.size} saved account(s)", "Save Steam login names for quick access. Sign-in stays on Steam's official website.") {
                                 OutlinedTextField(value = usernameInput, onValueChange = { usernameInput = it }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Steam account name") }, placeholder = { Text("Enter Steam username") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
                                 Button(onClick = {
                                     val name = usernameInput.trim()
